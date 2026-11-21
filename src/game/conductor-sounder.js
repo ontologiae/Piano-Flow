@@ -18,17 +18,16 @@ export default class ConductorSounder {
   }
 
   setLocation (location) {
-    this.nextOnBunch = location
     this.lastOnTick = root.performer.noteObjects[location][0].noteOnTick
   }
 
   // Power is volume
-  press (power) {
-    if (this.nextOnBunch < root.performer.noteObjects.length) {
+  // notes: the note objects to sound (the performer picks them: one hand's share of a bunch, or the whole bunch)
+  press (power, notes) {
+    if (notes && notes.length) {
       this.numPress++
       this.numPress < 0 && (this.numPress = 0)
-      const bunch = root.performer.noteObjects[this.nextOnBunch]
-      this.nextOnBunch++
+      const bunch = notes
       const newOn = []
       for (let i = 0; i < this.currentlyOn.length; i++) {
         const noteVis = this.currentlyOn[i]
@@ -50,7 +49,8 @@ export default class ConductorSounder {
         root.samplePlayer.noteOn(noteVis.notePitch, velocity, delay, delta)
         this.pitchPressStatus[noteVis.notePitch]++
         this.currentlyOn.push(noteVis)
-        this.lastOnTick = noteVis.noteOnTick
+        // With two hands the bunches are no longer sounded in time order: keep the latest tick reached
+        this.lastOnTick = Math.max(this.lastOnTick, noteVis.noteOnTick)
         lastPlayedTotalVel += velocity
       }
       return lastPlayedTotalVel
@@ -60,8 +60,8 @@ export default class ConductorSounder {
   depress () {
     this.numPress--
     this.numPress < 0 && (this.numPress = 0)
-    if (this.nextOnBunch < root.performer.noteObjects.length && this.numPress === 0) {
-      let noteOnTick = root.performer.noteObjects[this.nextOnBunch][0].noteOnTick
+    if (!root.performer.pieceEnded && this.numPress === 0) {
+      let noteOnTick = root.performer.noteObjects[root.performer.nextTargetBunchIndex][0].noteOnTick
       const newOn = []
       for (let i = 0; i < this.currentlyOn.length; i++) {
         const noteVis = this.currentlyOn[i]

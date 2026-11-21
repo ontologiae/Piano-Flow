@@ -21,6 +21,7 @@ export default class ConductorNoteVis {
     this.noteOffTick = note[1]
     this.notePitch = note[2]
     this.noteVel = note[3]
+    this.hand = note[4]
     this.emitParticlesAllowed = true
     this.setupSprite()
   }

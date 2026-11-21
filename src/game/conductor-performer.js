@@ -6,6 +6,7 @@ import ConductorSounder from './conductor-sounder'
 import ConductorNoteVis from './conductor-note-vis'
 import GhostPlayer from './ghost-player'
 import DecayParticleManager from './decay-particle-manager'
+import { HandCursors, handForKey, handForNote, otherHand, trackHandsFromNames } from './hands'
 
 export default class ConductorPerformer {
 
@@ -15,6 +16,8 @@ export default class ConductorPerformer {
     this.ghostInfos = []
     this.firstVisibleBunchIndex = location
     this.nextTargetBunchIndex = location // firstVisibleBunchIndex is equal to nextTargetBunchIndex
+    this.lastPlayedBunchIndex = Math.max(0, location - 1)
+    this.handCursors = null // set once the bunches exist, see ready()
     this.isGhostMode = isGhost
 
     this.bunchPositions = []
@@ -40,6 +43,7 @@ export default class ConductorPerformer {
       this.colorTheme = this.generateColorTheme(root.theme)
       this.noteInfos = this.generateNoteInfos(MIDI.Player.data)
       this.bunchInfos = this.generateBunchInfos(this.noteInfos)
+      this.handCursors = new HandCursors(this.bunchInfos, this.nextTargetBunchIndex)
       this.ghostInfos = this.generateGhostInfos(this.bunchInfos)
       this.render()
 
@@ -75,10 +79,12 @@ export default class ConductorPerformer {
     const noteInfos = []
     const noteTimes = []
     const noteVelocities = []
+    const trackHands = this.generateTrackHands(midiData)
 
     for (let i = 0, len = midiData.length; i < len; i++) {
       const midi = midiData[i]
       const event = midi[0].event
+      const track = midi[0].track
       const interval = midi[1]
       const { subtype, noteNumber, channel, velocity } = event
 
@@ -88,27 +94,41 @@ export default class ConductorPerformer {
       // It doesn't make any sense to convert it into piano notes. So just skip it.
       if (channel === 9) continue
 
+      // Notes are paired per track: two hands on two tracks may sound the same pitch together
+      const noteKey = track * 128 + noteNumber
+
       if (subtype === 'noteOn') {
         // if note is on, record its start time & velocity
-        noteTimes[noteNumber] = currentTime
-        noteVelocities[noteNumber] = velocity
+        noteTimes[noteKey] = currentTime
+        noteVelocities[noteKey] = velocity
       } else if (subtype === 'noteOff') {
         // if note if off, calculate its duration and build the model
-        const startTime = noteTimes[noteNumber]
+        const startTime = noteTimes[noteKey]
         const duration = currentTime - startTime
-        const velocity = noteVelocities[noteNumber]
+        const velocity = noteVelocities[noteKey]
         noteInfos.push({
           notePitch: noteNumber,
           duration: duration,
           startTime: startTime,
           endTime: currentTime,
-          velocity: velocity
+          velocity: velocity,
+          hand: handForNote(noteNumber, track, trackHands)
         })
       }
     }
 
     noteInfos.sort((a, b) => a.startTime - b.startTime)
     return noteInfos
+  }
+
+  // Track number -> hand, from track names like "Piano left" / "Piano right"; null when the file has no such pair
+  generateTrackHands (midiData) {
+    const trackNames = {}
+    for (let i = 0; i < midiData.length; i++) {
+      const { event, track } = midiData[i][0]
+      if (event.subtype === 'trackName') trackNames[track] = event.text
+    }
+    return trackHandsFromNames(trackNames)
   }
 
   generateBunchInfos (noteInfos) {
@@ -118,13 +138,13 @@ export default class ConductorPerformer {
 
     // TODO: Combine notes more flexible
     for (let i = 0; i < noteInfos.length; i++) {
-      const { startTime, endTime, notePitch, velocity } = noteInfos[i]
+      const { startTime, endTime, notePitch, velocity, hand } = noteInfos[i]
       if (Math.abs(startTime - currentStartTime) > (1000 / 12) && velocity > 16) { // startTime !== currentStartTime
         currentStartTime = startTime
         bunchInfos.push(bunch)
         bunch = []
       }
-      bunch.push([startTime, endTime, notePitch, velocity])
+      bunch.push([startTime, endTime, notePitch, velocity, hand])
     }
     bunchInfos.push(bunch) // Push the last bunch
     return bunchInfos
@@ -244,7 +264,7 @@ export default class ConductorPerformer {
           !note.isOnStage && note.addSelfToStage(root.stage)
           note.advance(deltaTime)
           if (!note.isPlayed && this.pressTrigger) {
-            const distanceRatio = 1 - (this.bunchPositions[i] - this.bunchPositions[this.nextTargetBunchIndex - 1]) / root.width
+            const distanceRatio = 1 - (this.bunchPositions[i] - this.bunchPositions[this.lastPlayedBunchIndex]) / root.width
             note.pressTrigger(distanceRatio, this.lastPlayedTotalVel)
           }
         }
@@ -275,37 +295,70 @@ export default class ConductorPerformer {
     if (this.isGhostMode) this.ghostPlayer.ready()
   }
 
-  pressAdvance () {
-    if (!this.pieceEnded) {
-      for (let i = 0; i < this.noteObjects[this.nextTargetBunchIndex].length; i++) {
-        const noteVis = this.noteObjects[this.nextTargetBunchIndex][i]
-        noteVis.playTrigger()
-      }
+  // Sounds and triggers the next notes, and returns whether anything was played.
+  // hand: 'left' | 'right' plays that hand's next notes, unless it must wait for the other hand;
+  // no hand (mouse, touch, ghost) plays every note of the next bunch, both hands together.
+  pressAdvance (hand, power) {
+    if (this.pieceEnded) return false
+    const hands = this.handCursors.handsToPlay(hand)
+    if (!hands.length) return false
 
-      this.nextTargetBunchIndex++
-      this.pressTrigger = true
-
-      if (this.nextTargetBunchIndex === this.noteObjects.length) {
-        this.nextTargetBunchIndex--
-        this.pieceEnded = true
-        this.isGhostMode && root.endPiece()
+    const notes = []
+    for (let h = 0; h < hands.length; h++) {
+      const bunchIndex = this.handCursors.cursor(hands[h])
+      const bunch = this.noteObjects[bunchIndex]
+      for (let i = 0; i < bunch.length; i++) {
+        bunch[i].hand === hands[h] && notes.push(bunch[i])
       }
+      this.lastPlayedBunchIndex = bunchIndex
+      this.handCursors.advance(hands[h])
     }
+
+    this.lastPlayedTotalVel = this.sounder.press(power, notes)
+    for (let i = 0; i < notes.length; i++) {
+      notes[i].playTrigger()
+    }
+    this.pressTrigger = true
+
+    if (this.handCursors.ended()) {
+      this.nextTargetBunchIndex = this.noteObjects.length - 1
+      this.pieceEnded = true
+      this.isGhostMode && root.endPiece()
+    } else {
+      this.nextTargetBunchIndex = this.handCursors.next()
+    }
+    return true
+  }
+
+  // Hand of a pressed key; null when the key belongs to neither zone.
+  // A hand without any note in the piece hands its zone over to the other hand.
+  handForKey (event) {
+    const hand = handForKey(event)
+    return hand && !this.handCursors.hasNotes(hand) ? otherHand(hand) : hand
   }
 
   handleKeyPress (event) {
+    if (this.isGhostMode) {
+      event.preventDefault()
+      return root.ghostWasSpooked()
+    }
+    const hand = this.handForKey(event)
+    if (!hand) return // Outside both zones: not a piano key
     event.preventDefault()
-    if (this.isGhostMode) return root.ghostWasSpooked()
+    // A held key plays once, even if the OS repeats it after the other hand let it through
+    if (event.repeat && !root.repeatOnHold) return
     if (this.pressedKeys.indexOf(event.keyCode) === -1) {
-      !root.repeatOnHold && this.pressedKeys.push(event.keyCode)
-      this.lastPlayedTotalVel = this.sounder.press(0.5)
-      this.pressAdvance()
+      // A press that waits for the other hand plays nothing and is not recorded
+      if (this.pressAdvance(hand, 0.5)) {
+        !root.repeatOnHold && this.pressedKeys.push(event.keyCode)
+      }
     }
   }
 
   handleKeyDepress (event) {
+    if (this.isGhostMode) return event.preventDefault()
+    if (!this.handForKey(event)) return
     event.preventDefault()
-    if (this.isGhostMode) return
     if (this.pressedKeys.indexOf(event.keyCode) !== -1) {
       this.pressedKeys.splice(this.pressedKeys.indexOf(event.keyCode), 1)
       this.sounder.depress()
@@ -322,9 +375,8 @@ export default class ConductorPerformer {
       if (this.touchedIds.indexOf(touch.identifier) === -1) {
         !root.repeatOnHold && this.touchedIds.push(touch.identifier)
         const power = (root.height - touch.clientY) / root.height
-        this.lastPlayedTotalVel = this.sounder.press(power)
+        this.pressAdvance(null, power)
         this.numTouched++
-        this.pressAdvance()
       }
     }
   }
@@ -350,8 +402,7 @@ export default class ConductorPerformer {
     if (event.which === 1) {
       if (this.isGhostMode) return root.ghostWasSpooked()
       const power = (root.height - event.clientY) / root.height
-      this.lastPlayedTotalVel = this.sounder.press(power)
-      this.pressAdvance()
+      this.pressAdvance(null, power)
     }
   }
 
@@ -378,8 +429,7 @@ export default class ConductorPerformer {
   }
 
   ghostOn () {
-    this.lastPlayedTotalVel = this.sounder.press(0.5)
-    this.pressAdvance()
+    this.pressAdvance(null, 0.5)
   }
 
   ghostOff () {
