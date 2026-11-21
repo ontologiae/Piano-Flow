@@ -40,11 +40,11 @@ export const HAND_SYNC = 'clock'
  */
 export const CLOCK = {
   tempoWindow: 4, // nombre d'intervalles pour estimer le tempo
-  earlyRatio: 0.35, // avance tolérée, en fraction de l'intervalle attendu…
+  earlyRatio: 0.75, // avance tolérée, en fraction de l'intervalle attendu… (0,35 bridait les accélérations)
   earlyMinMs: 120, // … bornée en ms réelles
   earlyMaxMs: 1500,
   lateMs: 150, // retard au-delà duquel une note est manquée (ms réelles)
-  outlierFactor: 2.5, // un intervalle plus de 2,5 fois plus lent ou plus rapide que k ne change pas k
+  outlierFactor: 2.5, // plus de 2,5 fois plus lent que k : ignoré ; plus de 2,5 fois plus rapide : borné
   tempoMin: 0.25, // bornes de k
   tempoMax: 4
 }
@@ -225,10 +225,12 @@ export class HandCursors {
     if (!this.anchor) this.anchor = { real: now, score: this.times[bunch] }
     const score = this.times[bunch] - this.anchor.score
     if (score <= 0) return // la main en retard rattrape un groupe déjà atteint : l'horloge ne bouge pas
-    const real = now - this.anchor.real
-    const ratio = real / score
     const factor = this.clock.outlierFactor
-    if (ratio >= this.tempo / factor && ratio <= this.tempo * factor) {
+    // Un intervalle beaucoup plus lent (point d'orgue, hésitation) ne change pas le tempo.
+    // Un intervalle beaucoup plus rapide est borné, pas ignoré : sinon l'horloge ne pourrait
+    // que ralentir et les traits rapides resteraient au pas des notes lentes.
+    if ((now - this.anchor.real) / score <= this.tempo * factor) {
+      const real = Math.max(now - this.anchor.real, score * this.tempo / factor)
       this.intervals.push({ real, score })
       if (this.intervals.length > this.clock.tempoWindow) this.intervals.shift()
       this.tempo = this.estimateTempo()
