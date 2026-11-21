@@ -6,7 +6,8 @@ import ConductorSounder from './conductor-sounder'
 import ConductorNoteVis from './conductor-note-vis'
 import GhostPlayer from './ghost-player'
 import DecayParticleManager from './decay-particle-manager'
-import { HandCursors, handForKey, handForNote, otherHand, trackHandsFromNames } from './hands'
+import { HandCursors, handForKey, handForNote, otherHand, trackHandsFromNames, HAND_SYNC, SPLIT_PITCH, LEFT_HAND_KEYS, RIGHT_HAND_KEYS } from './hands'
+import { log } from './journal'
 
 export default class ConductorPerformer {
 
@@ -51,8 +52,49 @@ export default class ConductorPerformer {
       this.sounder = new ConductorSounder()
       this.sounder.setLocation(this.firstVisibleBunchIndex)
 
+      this.logPiece()
       root.performerReady()
     }, 0)
+  }
+
+  // Score time (ms) of a bunch, null past the end
+  bunchTime (index) {
+    return index === Infinity || index == null || !this.bunchInfos[index] ? null : Math.round(this.bunchInfos[index][0][0])
+  }
+
+  handState () {
+    const state = { present: this.lastPlayedBunchIndex, nextTarget: this.nextTargetBunchIndex }
+    ;['left', 'right'].forEach(hand => {
+      const cursor = this.handCursors.cursor(hand)
+      state[hand] = { cursor: cursor === Infinity ? 'fin' : cursor, time: this.bunchTime(cursor) }
+    })
+    return state
+  }
+
+  logPiece () {
+    const piece = root.piece || {}
+    const count = { left: 0, right: 0 }
+    this.noteInfos.forEach(n => count[n.hand]++)
+    log('INFO', 'piece.ready', {
+      name: piece.name,
+      midiFile: piece.midiFile,
+      mode: this.isGhostMode ? 'autoplay' : 'rhythm',
+      handSync: HAND_SYNC,
+      attribution: this.trackHands ? 'pistes' : 'pivot ' + SPLIT_PITCH,
+      trackNames: this.trackNames,
+      trackHands: this.trackHands,
+      location: this.nextTargetBunchIndex,
+      bunches: this.bunchInfos.length,
+      notes: this.noteInfos.length,
+      notesPerHand: count,
+      keys: { left: LEFT_HAND_KEYS.join(''), right: RIGHT_HAND_KEYS.join('') }
+    })
+    // Full map of the piece: [bunch, score time ms, hands, pitches per hand]
+    log('INFO', 'piece.score', this.bunchInfos.map((bunch, i) => {
+      const pitches = { G: [], D: [] }
+      bunch.forEach(n => pitches[n[4] === 'left' ? 'G' : 'D'].push(n[2]))
+      return [i, Math.round(bunch[0][0]), (pitches.G.length ? 'G' : '') + (pitches.D.length ? 'D' : ''), pitches.G, pitches.D]
+    }))
   }
 
   render () {
@@ -80,6 +122,7 @@ export default class ConductorPerformer {
     const noteTimes = []
     const noteVelocities = []
     const trackHands = this.generateTrackHands(midiData)
+    this.trackHands = trackHands
 
     for (let i = 0, len = midiData.length; i < len; i++) {
       const midi = midiData[i]
@@ -128,6 +171,7 @@ export default class ConductorPerformer {
       const { event, track } = midiData[i][0]
       if (event.subtype === 'trackName') trackNames[track] = event.text
     }
+    this.trackNames = trackNames
     return trackHandsFromNames(trackNames)
   }
 
@@ -299,20 +343,44 @@ export default class ConductorPerformer {
   // hand: 'left' | 'right' plays that hand's next notes (see HAND_SYNC in ./hands for how the hands sync);
   // no hand (mouse, touch, ghost) plays every note of the next bunch, both hands together.
   // Once the piece has ended, the other hand may still play its share of the last bunch.
-  pressAdvance (hand, power) {
+  pressAdvance (hand, power, input) {
+    const before = this.handState()
     const hands = this.handCursors.handsToPlay(hand)
-    if (!hands.length) return false
+    if (!hands.length) {
+      let reason = 'morceau fini'
+      if (hand && this.handCursors.cursor(hand) === Infinity) reason = 'main terminée'
+      else if (hand) reason = 'attente : l\'autre main a une note avant'
+      log('INFO', 'press.refused', { input, hand, reason, before })
+      return false
+    }
 
     const notes = []
+    const played = []
+    const missedLog = []
     for (let h = 0; h < hands.length; h++) {
       const bunchIndex = this.handCursors.cursor(hands[h])
       const bunch = this.noteObjects[bunchIndex]
+      const pitches = []
       for (let i = 0; i < bunch.length; i++) {
-        bunch[i].hand === hands[h] && notes.push(bunch[i])
+        if (bunch[i].hand === hands[h]) {
+          notes.push(bunch[i])
+          pitches.push(bunch[i].notePitch)
+        }
       }
+      played.push({ hand: hands[h], bunch: bunchIndex, time: this.bunchTime(bunchIndex), pitches })
       this.lastPlayedBunchIndex = bunchIndex
       const missed = this.handCursors.advance(hands[h])
-      this.missNotes(otherHand(hands[h]), missed)
+      const missedNotes = this.missNotes(otherHand(hands[h]), missed)
+      if (missed.length) {
+        missedLog.push({
+          hand: otherHand(hands[h]),
+          bunchCount: missed.length,
+          noteCount: missedNotes,
+          from: { bunch: missed[0], time: this.bunchTime(missed[0]) },
+          to: { bunch: missed[missed.length - 1], time: this.bunchTime(missed[missed.length - 1]) },
+          bunches: missed
+        })
+      }
     }
 
     this.lastPlayedTotalVel = this.sounder.press(power, notes)
@@ -321,25 +389,36 @@ export default class ConductorPerformer {
     }
     this.pressTrigger = true
 
-    if (this.pieceEnded) return true
-    if (this.handCursors.ended()) {
-      this.nextTargetBunchIndex = this.noteObjects.length - 1
-      this.pieceEnded = true
-      this.isGhostMode && root.endPiece()
-    } else {
-      this.nextTargetBunchIndex = this.handCursors.next()
+    const wasEnded = this.pieceEnded
+    if (!this.pieceEnded) {
+      if (this.handCursors.ended()) {
+        this.nextTargetBunchIndex = this.noteObjects.length - 1
+        this.pieceEnded = true
+      } else {
+        this.nextTargetBunchIndex = this.handCursors.next()
+      }
     }
+    log(missedLog.length ? 'WARN' : 'INFO', 'press', {
+      input, hand, played, missed: missedLog, before, after: this.handState(), pieceEnded: this.pieceEnded, afterEnd: wasEnded
+    })
+    if (!wasEnded && this.pieceEnded && this.isGhostMode) root.endPiece()
     return true
   }
 
-  // The hand's notes in these bunches were not played in time: they stay silent and fade out
+  // The hand's notes in these bunches were not played in time: they stay silent and fade out.
+  // Returns the number of notes missed.
   missNotes (hand, bunchIndexes) {
+    let count = 0
     for (let b = 0; b < bunchIndexes.length; b++) {
       const bunch = this.noteObjects[bunchIndexes[b]]
       for (let i = 0; i < bunch.length; i++) {
-        bunch[i].hand === hand && bunch[i].missTrigger()
+        if (bunch[i].hand === hand) {
+          bunch[i].missTrigger()
+          count++
+        }
       }
     }
+    return count
   }
 
   // Hand of a pressed key; null when the key belongs to neither zone.
@@ -353,32 +432,44 @@ export default class ConductorPerformer {
     return done && this.handCursors.cursor(other) !== Infinity ? other : hand
   }
 
+  keyInput (event) {
+    return { source: 'key', key: event.key, keyCode: event.keyCode, repeat: !!event.repeat, zone: handForKey(event), pressedKeys: this.pressedKeys.slice(0) }
+  }
+
   handleKeyPress (event) {
+    const input = this.keyInput(event)
     if (this.isGhostMode) {
       event.preventDefault()
+      log('INFO', 'key.ghostSpooked', input)
       return root.ghostWasSpooked()
     }
     const hand = this.handForKey(event)
-    if (!hand) return // Outside both zones: not a piano key
+    if (!hand) return log('INFO', 'key.ignored', input) // Outside both zones: not a piano key
+    if (hand !== input.zone) input.transferredTo = hand
     event.preventDefault()
     // A held key plays once, even if the OS repeats it after the other hand let it through
-    if (event.repeat && !root.repeatOnHold) return
+    if (event.repeat && !root.repeatOnHold) return log('DEBUG', 'key.repeatIgnored', input)
     if (this.pressedKeys.indexOf(event.keyCode) === -1) {
       // A press that waits for the other hand plays nothing and is not recorded
-      if (this.pressAdvance(hand, 0.5)) {
+      if (this.pressAdvance(hand, 0.5, input)) {
         !root.repeatOnHold && this.pressedKeys.push(event.keyCode)
       }
+    } else {
+      log('DEBUG', 'key.alreadyDown', input)
     }
   }
 
   handleKeyDepress (event) {
+    const input = this.keyInput(event)
     if (this.isGhostMode) return event.preventDefault()
-    if (!this.handForKey(event)) return
+    if (!this.handForKey(event)) return log('DEBUG', 'key.up.ignored', input)
     event.preventDefault()
-    if (this.pressedKeys.indexOf(event.keyCode) !== -1) {
+    const wasDown = this.pressedKeys.indexOf(event.keyCode) !== -1
+    if (wasDown) {
       this.pressedKeys.splice(this.pressedKeys.indexOf(event.keyCode), 1)
       this.sounder.depress()
     }
+    log('DEBUG', 'key.up', { input, wasDown, pieceEnded: this.pieceEnded })
     if (this.pieceEnded && !this.pressedKeys.length) {
       root.endPiece()
     }
@@ -391,7 +482,7 @@ export default class ConductorPerformer {
       if (this.touchedIds.indexOf(touch.identifier) === -1) {
         !root.repeatOnHold && this.touchedIds.push(touch.identifier)
         const power = (root.height - touch.clientY) / root.height
-        this.pressAdvance(null, power)
+        this.pressAdvance(null, power, { source: 'touch', id: touch.identifier, y: touch.clientY })
         this.numTouched++
       }
     }
@@ -418,7 +509,7 @@ export default class ConductorPerformer {
     if (event.which === 1) {
       if (this.isGhostMode) return root.ghostWasSpooked()
       const power = (root.height - event.clientY) / root.height
-      this.pressAdvance(null, power)
+      this.pressAdvance(null, power, { source: 'mouse', y: event.clientY })
     }
   }
 
@@ -445,7 +536,7 @@ export default class ConductorPerformer {
   }
 
   ghostOn () {
-    this.pressAdvance(null, 0.5)
+    this.pressAdvance(null, 0.5, { source: 'ghost' })
   }
 
   ghostOff () {

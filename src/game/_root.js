@@ -4,6 +4,7 @@ import { bus, context } from '../services'
 import Perlin from './perlin'
 import SamplePlayer from './sample-player'
 import ConductorPerformer from './conductor-performer'
+import { log } from './journal'
 
 // Refactor Flag: I will rewrite a better one in the future
 class Root {
@@ -62,6 +63,7 @@ class Root {
     this.mode = options.mode
     this.vm = options.vm
     this.instrument = options.instrument
+    this.piece = options.piece
     this.repeatOnHold = options.repeatOnHold
     this.initLocation = options.location
 
@@ -195,6 +197,7 @@ class Root {
   }
 
   endPiece () {
+    log('INFO', 'piece.end', { name: this.piece && this.piece.name, mode: this.mode })
     this.mode = 'rhythm' // Avoid autoplay in a loop
     this.vm.mode = 'rhythm'
     bus.$emit('toast', { msg: 'Fin. The piece renewed for you.', type: 'info' })
@@ -219,6 +222,7 @@ class Root {
   }
 
   restart () {
+    log('INFO', 'piece.restart', { name: this.piece && this.piece.name })
     this.stop()
     this._mount()
   }

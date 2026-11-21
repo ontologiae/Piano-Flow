@@ -27,7 +27,8 @@ module.exports = {
       port: process.env.PORT || 3000,
       open: false,
       server: {
-        baseDir: ['./dist']
+        baseDir: ['./dist'],
+        middleware: [require('./journal-middleware')]
       }
     })
   ]),
