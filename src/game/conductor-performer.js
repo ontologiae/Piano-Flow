@@ -42,6 +42,7 @@ export default class ConductorPerformer {
   ready () {
     setTimeout(() => {
       this.colorTheme = this.generateColorTheme(root.theme)
+      this.handColors = this.generateHandColors(root.theme)
       this.noteInfos = this.generateNoteInfos(MIDI.Player.data)
       this.bunchInfos = this.generateBunchInfos(this.noteInfos)
       this.handCursors = new HandCursors(this.bunchInfos, this.nextTargetBunchIndex)
@@ -101,6 +102,12 @@ export default class ConductorPerformer {
   render () {
     this.bunchPositions = this.generateBunchPositions(this.bunchInfos)
     this.noteObjects = this.generateNoteObjects(this.bunchInfos)
+  }
+
+  // Right hand: the theme's brand colour (blue in "moonized"); left hand: its accent (brown in "moonized")
+  generateHandColors (theme) {
+    if (Array.isArray(theme)) return { right: this.colorTheme[4], left: this.colorTheme[1] }
+    return { right: rgb2hex(theme.brand), left: rgb2hex(theme.accent) }
   }
 
   generateColorTheme (theme) {
@@ -253,31 +260,9 @@ export default class ConductorPerformer {
         noteVis.setScale(0.003125 * root.height * (128 / this.noteTexture.width) * 0.4 * root.sizeMultiplier)
         noteVisBunch.push(noteVis)
       }
-      // Set tint
-      const bunchSortedByPitch = noteVisBunch.slice(0).sort((a, b) => a.notePitch - b.notePitch)
-      switch (bunchSortedByPitch.length) {
-        case 1:
-          bunchSortedByPitch[0].setTint(this.colorTheme[4])
-          break
-        case 2:
-          bunchSortedByPitch[0].setTint(this.colorTheme[1])
-          bunchSortedByPitch[1].setTint(this.colorTheme[4])
-          break
-        case 3:
-          bunchSortedByPitch[0].setTint(this.colorTheme[1])
-          bunchSortedByPitch[1].setTint(this.colorTheme[3])
-          bunchSortedByPitch[2].setTint(this.colorTheme[4])
-          break
-        case 4:
-          bunchSortedByPitch[0].setTint(this.colorTheme[1])
-          bunchSortedByPitch[1].setTint(this.colorTheme[2])
-          bunchSortedByPitch[2].setTint(this.colorTheme[3])
-          bunchSortedByPitch[3].setTint(this.colorTheme[4])
-          break
-        default:
-          for (let i = 0; i < bunchSortedByPitch.length; i++) {
-            bunchSortedByPitch[i].setTint(this.colorTheme[4 - Math.min(bunchSortedByPitch.length - 1 - i, this.colorTheme.length - 1)])
-          }
+      // Tint by hand, so that each key zone has its colour on screen
+      for (let i = 0; i < noteVisBunch.length; i++) {
+        noteVisBunch[i].setTint(this.handColors[noteVisBunch[i].hand])
       }
       index++
     }
