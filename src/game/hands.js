@@ -19,6 +19,14 @@ export const TRACK_NAME_PATTERNS = {
 }
 export const SPLIT_PITCH = 60
 
+// Synchronisation des deux mains. Sans horloge, une inversion d'ordre entre les mains
+// ne dit pas laquelle se trompe ; chaque mode tranche autrement :
+// 'skip' : la main en retard a tort. Quand une main joue un groupe, les notes non jouées
+//          de l'autre main dans les groupes antérieurs sont manquées et ne sonnent pas.
+//          Les notes de l'autre main dans le même groupe restent jouables.
+// 'wait' : la main en avance a tort. Elle ne joue pas tant que l'autre a une note avant.
+export const HAND_SYNC = 'skip'
+
 export function otherHand (hand) {
   return hand === 'left' ? 'right' : 'left'
 }
@@ -58,15 +66,16 @@ export function handForNote (pitch, track, trackHands) {
  * Un curseur par main sur la liste des groupes de notes (bunches).
  *
  * Le curseur d'une main est l'indice du prochain groupe contenant une note non jouée
- * de cette main, Infinity quand elle a fini. Une main ne peut jouer son groupe que si
- * l'autre n'a aucune note non jouée avant lui : la main en avance attend l'autre.
- * Le plus petit des deux curseurs est le prochain instant du morceau.
+ * de cette main, Infinity quand elle a fini. Le plus petit des deux curseurs est le
+ * prochain instant du morceau. Voir HAND_SYNC pour la règle entre les deux mains.
  *
  * Chaque groupe est un tableau de notes dont l'élément d'indice 4 est la main.
  */
 export class HandCursors {
 
-  constructor (bunchInfos, location = 0) {
+  constructor (bunchInfos, location = 0, mode = HAND_SYNC) {
+    this.mode = mode
+    this.lastIndex = bunchInfos.length - 1
     this.lists = { left: [], right: [] }
     for (let i = 0; i < bunchInfos.length; i++) {
       const present = { left: false, right: false }
@@ -74,6 +83,7 @@ export class HandCursors {
       HANDS.forEach(hand => present[hand] && this.lists[hand].push(i))
     }
     this.positions = { left: 0, right: 0 }
+    this.lastPlayed = { left: -1, right: -1 }
     HANDS.forEach(hand => {
       while (this.positions[hand] < this.lists[hand].length && this.lists[hand][this.positions[hand]] < location) {
         this.positions[hand]++
@@ -81,32 +91,35 @@ export class HandCursors {
     })
   }
 
-  // La main a-t-elle au moins une note dans le morceau ?
-  hasNotes (hand) {
-    return this.lists[hand].length > 0
-  }
-
   cursor (hand) {
     const position = this.positions[hand]
     return position < this.lists[hand].length ? this.lists[hand][position] : Infinity
   }
 
-  // Prochain groupe non entièrement joué, Infinity quand le morceau est fini
+  // Prochain groupe non entièrement joué, Infinity quand les deux mains ont fini
   next () {
     return Math.min(this.cursor('left'), this.cursor('right'))
   }
 
+  /**
+   * Le morceau est fini quand les deux mains ont fini, ou, en mode 'skip', dès qu'une main
+   * a joué le dernier groupe : sinon jouer une seule main laisserait en suspens la part de
+   * l'autre dans le dernier accord, qu'aucun groupe ultérieur ne viendra faire manquer.
+   * L'autre main peut encore jouer sa part de ce dernier groupe.
+   */
   ended () {
-    return this.next() === Infinity
+    if (this.next() === Infinity) return true
+    return this.mode === 'skip' && (this.lastPlayed.left === this.lastIndex || this.lastPlayed.right === this.lastIndex)
   }
 
   canAdvance (hand) {
     const mine = this.cursor(hand)
-    return mine !== Infinity && this.cursor(otherHand(hand)) >= mine
+    if (mine === Infinity) return false
+    return this.mode === 'skip' || this.cursor(otherHand(hand)) >= mine
   }
 
   /**
-   * Mains qui jouent à cette pression. Avec une main : elle seule, si elle n'attend pas.
+   * Mains qui jouent à cette pression. Avec une main : elle seule, si elle peut avancer.
    * Sans main (souris, toucher, fantôme) : toutes celles qui sont sur le prochain groupe.
    */
   handsToPlay (hand) {
@@ -115,8 +128,24 @@ export class HandCursors {
     return next === Infinity ? [] : HANDS.filter(h => this.cursor(h) === next)
   }
 
+  /**
+   * La main joue son groupe courant. Retourne les indices des groupes où l'autre main
+   * vient de manquer ses notes (strictement avant le groupe joué), et fait passer
+   * le curseur de l'autre main au-delà. Toujours vide en mode 'wait'.
+   */
   advance (hand) {
+    const index = this.cursor(hand)
     this.positions[hand]++
+    this.lastPlayed[hand] = index
+    const missed = []
+    if (this.mode === 'skip') {
+      const other = otherHand(hand)
+      while (this.cursor(other) < index) {
+        missed.push(this.cursor(other))
+        this.positions[other]++
+      }
+    }
+    return missed
   }
 
 }

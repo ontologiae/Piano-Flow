@@ -14,6 +14,7 @@ export default class ConductorNoteVis {
     this.sizeMul = size
     this.texture = noteTexture
     this.isPlayed = false
+    this.isMissed = false
     this.sprite = null
     this.isOnStage = false
     this.bubbleScale = 0
@@ -73,6 +74,13 @@ export default class ConductorNoteVis {
     this.sprite.scale.x *= 2
     this.sprite.scale.y *= 2
     this.bubbleScale = 0
+  }
+
+  // The other hand went past this note before it was played: it stays silent, dimmed, in place
+  missTrigger () {
+    this.isMissed = true
+    this.bubbleScale = 0
+    this.sprite.alpha = 0.2
   }
 
   pressTrigger (distanceRatio, velocity) {

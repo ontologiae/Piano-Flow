@@ -263,7 +263,7 @@ export default class ConductorPerformer {
           note.setPosition(noteX, noteY)
           !note.isOnStage && note.addSelfToStage(root.stage)
           note.advance(deltaTime)
-          if (!note.isPlayed && this.pressTrigger) {
+          if (!note.isPlayed && !note.isMissed && this.pressTrigger) {
             const distanceRatio = 1 - (this.bunchPositions[i] - this.bunchPositions[this.lastPlayedBunchIndex]) / root.width
             note.pressTrigger(distanceRatio, this.lastPlayedTotalVel)
           }
@@ -296,10 +296,10 @@ export default class ConductorPerformer {
   }
 
   // Sounds and triggers the next notes, and returns whether anything was played.
-  // hand: 'left' | 'right' plays that hand's next notes, unless it must wait for the other hand;
+  // hand: 'left' | 'right' plays that hand's next notes (see HAND_SYNC in ./hands for how the hands sync);
   // no hand (mouse, touch, ghost) plays every note of the next bunch, both hands together.
+  // Once the piece has ended, the other hand may still play its share of the last bunch.
   pressAdvance (hand, power) {
-    if (this.pieceEnded) return false
     const hands = this.handCursors.handsToPlay(hand)
     if (!hands.length) return false
 
@@ -311,7 +311,8 @@ export default class ConductorPerformer {
         bunch[i].hand === hands[h] && notes.push(bunch[i])
       }
       this.lastPlayedBunchIndex = bunchIndex
-      this.handCursors.advance(hands[h])
+      const missed = this.handCursors.advance(hands[h])
+      this.missNotes(otherHand(hands[h]), missed)
     }
 
     this.lastPlayedTotalVel = this.sounder.press(power, notes)
@@ -320,6 +321,7 @@ export default class ConductorPerformer {
     }
     this.pressTrigger = true
 
+    if (this.pieceEnded) return true
     if (this.handCursors.ended()) {
       this.nextTargetBunchIndex = this.noteObjects.length - 1
       this.pieceEnded = true
@@ -330,11 +332,25 @@ export default class ConductorPerformer {
     return true
   }
 
+  // The hand's notes in these bunches were not played in time: they stay silent and fade out
+  missNotes (hand, bunchIndexes) {
+    for (let b = 0; b < bunchIndexes.length; b++) {
+      const bunch = this.noteObjects[bunchIndexes[b]]
+      for (let i = 0; i < bunch.length; i++) {
+        bunch[i].hand === hand && bunch[i].missTrigger()
+      }
+    }
+  }
+
   // Hand of a pressed key; null when the key belongs to neither zone.
-  // A hand without any note in the piece hands its zone over to the other hand.
+  // A hand with nothing left to play hands its zone over to the other hand: without a clock,
+  // nothing else would ever make the other hand's remaining notes playable or missed.
   handForKey (event) {
     const hand = handForKey(event)
-    return hand && !this.handCursors.hasNotes(hand) ? otherHand(hand) : hand
+    if (!hand) return null
+    const other = otherHand(hand)
+    const done = this.handCursors.cursor(hand) === Infinity
+    return done && this.handCursors.cursor(other) !== Infinity ? other : hand
   }
 
   handleKeyPress (event) {
